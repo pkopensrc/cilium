@@ -18,6 +18,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -308,23 +309,13 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		args[initArgNodePort] = "true"
 		if option.Config.EnableIPv4 {
 			addrs := node.GetNodePortIPv4AddrsWithDevices()
-			tmp := make([]string, 0, len(addrs))
-			for iface, ipv4 := range addrs {
-				tmp = append(tmp,
-					fmt.Sprintf("%s=%#x", iface,
-						byteorder.HostSliceToNetwork(ipv4, reflect.Uint32).(uint32)))
-			}
-			args[initArgNodePortIPv4Addrs] = strings.Join(tmp, ";")
+			args[initArgNodePortIPv4Addrs] = ifaceToNetIPMapToArg(addrs, false)
 		} else {
 			args[initArgNodePortIPv4Addrs] = "<nil>"
 		}
 		if option.Config.EnableIPv6 {
 			addrs := node.GetNodePortIPv6AddrsWithDevices()
-			tmp := make([]string, 0, len(addrs))
-			for iface, ipv6 := range addrs {
-				tmp = append(tmp, fmt.Sprintf("%s=%s", iface, common.GoArray2CNoSpaces(ipv6)))
-			}
-			args[initArgNodePortIPv6Addrs] = strings.Join(tmp, ";")
+			args[initArgNodePortIPv6Addrs] = ifaceToNetIPMapToArg(addrs, true)
 		} else {
 			args[initArgNodePortIPv6Addrs] = "<nil>"
 		}
@@ -333,6 +324,12 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 		args[initArgNodePortIPv4Addrs] = "<nil>"
 		args[initArgNodePortIPv6Addrs] = "<nil>"
 	}
+	//if option.Config.Masquerade && option.Config.EnableBPFMasquerade && option.Config.EnableIPv4 {
+	//	addrs := node.GetMasqIPv4AddrsWithDevices()
+	//	args[initArgBpfMasqIPv4Addrs] = ifaceToNetIPMapToArg(addrs)
+	//} else {
+	//	args[initArgBpfMasqIPv4Addrs] = "<nil>"
+	//}
 
 	if option.Config.NodePortBindProtection {
 		args[initArgNodePortBind] = "true"
@@ -430,4 +427,19 @@ func (l *Loader) Reinitialize(ctx context.Context, o datapath.BaseProgramOwner, 
 	}
 
 	return nil
+}
+
+func ifaceToNetIPMapToArg(in map[string]net.IP, ipv6 bool) string {
+	out := make([]string, 0, len(in))
+	for iface, ip := range in {
+		var tmp string
+		if ipv6 {
+			tmp = fmt.Sprintf("%s=%s", iface, common.GoArray2CNoSpaces(ip))
+		} else {
+			tmp = fmt.Sprintf("%s=%#x", iface,
+				byteorder.HostSliceToNetwork(ip, reflect.Uint32).(uint32))
+		}
+		out = append(out, tmp)
+	}
+	return strings.Join(out, ";")
 }
