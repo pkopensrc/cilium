@@ -297,7 +297,10 @@ func (n *linuxNodeHandler) deleteDirectRoute(CIDR *cidr.CIDR, nodeIP net.IP) {
 // f00d::a0a:0:0:0/112 via f00d::a0a:0:0:1 dev cilium_host src fd04::11 metric 1024 pref medium
 //
 func (n *linuxNodeHandler) createNodeRoute(prefix *cidr.CIDR) (route.Route, error) {
-	var local, nexthop net.IP
+	var (
+		local   net.IP
+		nexthop *net.IP
+	)
 	if prefix.IP.To4() != nil {
 		if n.nodeAddressing.IPv4() == nil {
 			return route.Route{}, fmt.Errorf("IPv4 addressing unavailable")
@@ -307,8 +310,8 @@ func (n *linuxNodeHandler) createNodeRoute(prefix *cidr.CIDR) (route.Route, erro
 			return route.Route{}, fmt.Errorf("IPv4 router address unavailable")
 		}
 
-		nexthop = n.nodeAddressing.IPv4().Router()
-		local = nexthop
+		local = n.nodeAddressing.IPv4().Router()
+		nexthop = &local
 	} else {
 		if n.nodeAddressing.IPv6() == nil {
 			return route.Route{}, fmt.Errorf("IPv6 addressing unavailable")
@@ -322,13 +325,13 @@ func (n *linuxNodeHandler) createNodeRoute(prefix *cidr.CIDR) (route.Route, erro
 			return route.Route{}, fmt.Errorf("External IPv6 address unavailable")
 		}
 
-		nexthop = n.nodeAddressing.IPv6().Router()
-		local = n.nodeAddressing.IPv6().PrimaryExternal()
+		local = n.nodeAddressing.IPv6().Router()
+		nexthop = nil
 	}
 
 	// The default routing table accounts for encryption overhead for encrypt-node traffic
 	return route.Route{
-		Nexthop: &nexthop,
+		Nexthop: nexthop,
 		Local:   local,
 		Device:  n.datapathConfig.HostDevice,
 		Prefix:  *prefix.IPNet,

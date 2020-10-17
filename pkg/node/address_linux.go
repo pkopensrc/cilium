@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/cilium/cilium/pkg/ip"
+	"github.com/cilium/cilium/pkg/option"
 
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
@@ -37,6 +38,19 @@ func firstGlobalAddr(intf string, preferredIP net.IP, family int, preferPublic b
 	var err error
 
 	ipsToExclude := GetExcludedIPs()
+
+	// When trying to find the global address we exclude the HostDevice IP addresses.
+	l, err := netlink.LinkByName(option.Config.HostDevice)
+	if err == nil {
+		ciliumHostAddrs, err := netlink.AddrList(l, family)
+		if err != nil {
+			return nil, fmt.Errorf("error getting cilium host device addresses %w", err)
+		}
+		for _, addr := range ciliumHostAddrs {
+			ipsToExclude = append(ipsToExclude, addr.IP)
+		}
+	}
+
 	linkScopeMax := unix.RT_SCOPE_UNIVERSE
 	if family == netlink.FAMILY_V4 {
 		ipLen = 4

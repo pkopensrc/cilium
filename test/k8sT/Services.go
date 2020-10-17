@@ -58,7 +58,7 @@ var _ = Describe("K8sServicesTest", func() {
 		kubectl = helpers.CreateKubectl(helpers.K8s1VMName(), logger)
 
 		dualStackSupportEnabled = helpers.DualStackSupported()
-		if dualStackSupportEnabled {
+		if dualStackSupportEnabled && helpers.RunsWithKubeProxy() {
 			// This is a fix required for kube-proxy when running in dual-stack mode.
 			// Sometimes there is a condition where kube-proxy repeatedly fails as it is not able
 			// to find KUBE-MARK-DROP iptables chain for IPv6 which should be created by kubelet.
@@ -75,7 +75,7 @@ var _ = Describe("K8sServicesTest", func() {
 			if err == nil {
 				for _, pod := range kubeproxyPods {
 					res := kubectl.ExecPodCmd("kube-system", pod, "ip6tables -t nat -N KUBE-MARK-DROP")
-					if !res.WasSuccessful() {
+					if !res.WasSuccessful() && !strings.Contains(res.CombineOutput().String(), "Chain already exists") {
 						GinkgoPrint("Error adding KUBE-MARK-DROP chain: %s, skipping KUBE-MARK-DROP ensure tests might fail.", res.CombineOutput().String())
 					}
 				}
@@ -124,7 +124,7 @@ var _ = Describe("K8sServicesTest", func() {
 
 	manualIPv6TestingNotRequired := func(f func() bool) func() bool {
 		return func() bool {
-			return helpers.DualStackSupported() && f()
+			return helpers.DualStackSupported() || f()
 		}
 	}
 
@@ -1760,7 +1760,7 @@ Secondary Interface %s :: IPv4: (%s, %s), IPv6: (%s, %s)`, dualStackSupportEnabl
 			}
 		})
 
-		SkipContextIf(manualIPv6TestingNotRequired(helpers.RunsWithoutKubeProxy), "IPv6 Connectivity", func() {
+		SkipContextIf(manualIPv6TestingNotRequired(helpers.RunsWithKubeProxy), "IPv6 Connectivity", func() {
 			testDSIPv6 := "fd03::310"
 
 			BeforeAll(func() {
