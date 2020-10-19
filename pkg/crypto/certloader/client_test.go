@@ -138,7 +138,7 @@ func TestWatchedClientConfigRotation(t *testing.T) {
 	defer c.Stop()
 
 	rotate(t, hubble, relay)
-	<-time.After(100 * time.Millisecond)
+	time.Sleep(testWatcherReloadDelay)
 
 	tlsConfig := c.ClientConfig(&tls.Config{
 		MinVersion: tls.VersionTLS13,
