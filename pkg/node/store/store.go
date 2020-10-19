@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/cilium/cilium/pkg/defaults"
-	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/kvstore/store"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
@@ -101,25 +100,26 @@ type NodeRegistrar struct {
 // RegisterObserver implements the store.Observer interface and sends
 // named node's identity updates on a channel.
 type RegisterObserver struct {
-	name   string
-	idChan chan uint32
+	name    string
+	updates chan *nodeTypes.Node
 }
 
 // NewRegisterObserver returns a new RegisterObserver
-func NewRegisterObserver(name string, idChan chan uint32) *RegisterObserver {
+func NewRegisterObserver(name string, updateChan chan *nodeTypes.Node) *RegisterObserver {
 	return &RegisterObserver{
-		name:   name,
-		idChan: idChan,
+		name:    name,
+		updates: updateChan,
 	}
 }
 
 func (o *RegisterObserver) OnUpdate(k store.Key) {
 	if n, ok := k.(*nodeTypes.Node); ok {
-		if n.NodeIdentity != 0 && n.Fullname() == o.name {
+		log.Debugf("noderegister update while waiting for %s: %v", o.name, n)
+		if n.NodeIdentity != 0 && n.Name == o.name {
 			select {
-			case o.idChan <- n.NodeIdentity:
+			case o.updates <- n:
 			default:
-				// Register Node idChan would block, not sending
+				// Register Node updateChan would block, not sending
 			}
 		}
 	}
@@ -128,7 +128,70 @@ func (o *RegisterObserver) OnUpdate(k store.Key) {
 func (o *RegisterObserver) OnDelete(k store.NamedKey) {
 }
 
-// RegisterNode registers the local node in the cluster
+// RegisterNode overloads GetKeyName to ignore the cluster name, as cluster name may not be stable during node registration.
+type RegisterNode struct {
+	*nodeTypes.Node
+}
+
+// Overload Node name w/o cluster name
+func (n *RegisterNode) GetKeyName() string {
+	return n.Name
+}
+
+// JoinCluster registers the local node in the cluster.
+// Blocks until timeout occurs or an updated Node is received from the kv-store and returns it.
+// Otherwise this does not block and returns nil.
+func (nr *NodeRegistrar) JoinCluster(name string) (*nodeTypes.Node, error) {
+	n := &RegisterNode{
+		Node: &nodeTypes.Node{
+			Name:   name,
+			Source: source.Local,
+		},
+	}
+
+	var resp *nodeTypes.Node
+
+	registerObserver := NewRegisterObserver(name, make(chan *nodeTypes.Node, 10))
+	// Join the shared store for node registrations
+	registerStore, err := store.JoinSharedStore(store.Configuration{
+		Prefix:     NodeRegisterStorePrefix,
+		KeyCreator: KeyCreator,
+		Observer:   registerObserver,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Delete any possible old key left over from previous run
+	registerStore.DeleteLocalKey(context.TODO(), n)
+
+	// Drain the channel of old updates first
+	for len(registerObserver.updates) > 0 {
+		dump := <-registerObserver.updates
+		log.Debugf("dumping stale noderegister update before update: %v", dump)
+	}
+	log.Debugf("updating noderegister with: %v", n)
+	err = registerStore.UpdateLocalKeySync(context.TODO(), n)
+	if err == nil {
+		// Wait until an updated key is received from the kvstore
+		select {
+		case resp = <-registerObserver.updates:
+		case <-time.After(defaults.NodeInitTimeout / 10):
+			registerStore.Release()
+			return nil, fmt.Errorf("timed out waiting for node identity")
+		}
+	}
+
+	if err != nil {
+		registerStore.Release()
+		return nil, err
+	}
+
+	nr.registerStore = registerStore
+	return resp, nil
+}
+
+// RegisterNode registers the local node in the cluster.
 func (nr *NodeRegistrar) RegisterNode(n *nodeTypes.Node, manager NodeManager) error {
 	if option.Config.KVStore == "" {
 		return nil
@@ -140,58 +203,22 @@ func (nr *NodeRegistrar) RegisterNode(n *nodeTypes.Node, manager NodeManager) er
 		KeyCreator: KeyCreator,
 		Observer:   NewNodeObserver(manager),
 	})
-
 	if err != nil {
 		return err
 	}
 
-	var registerStore *store.SharedStore
-	if option.Config.JoinCluster {
-		nodeId := make(chan uint32, 1)
-
-		// Join the shared store for node registrations
-		registerStore, err := store.JoinSharedStore(store.Configuration{
-			Prefix:     NodeRegisterStorePrefix,
-			KeyCreator: KeyCreator,
-			Observer:   NewRegisterObserver(n.Fullname(), nodeId),
-		})
-		if err != nil {
-			nodeStore.Release()
-			return err
-		}
-
-		// drain the channel of old updates first
-		for len(nodeId) > 0 {
-			<-nodeId
-		}
-		err = registerStore.UpdateLocalKeySync(context.TODO(), n)
-		if err == nil {
-			// Wait until node identity can has been allocated by the KV store
-			select {
-			case id := <-nodeId:
-				n.NodeIdentity = id
-				identity.SetLocalNodeID(id)
-			case <-time.After(defaults.NodeInitTimeout / 10):
-				registerStore.Release()
-				nodeStore.Release()
-				return fmt.Errorf("timed out waiting for node identity")
-			}
-		}
+	// Use registerNode for updating local node info if not nil, but keep nodeStore for cluster node updates
+	if nr.registerStore != nil {
+		err = nr.registerStore.UpdateLocalKeySync(context.TODO(), &RegisterNode{Node: n})
 	} else {
 		err = nodeStore.UpdateLocalKeySync(context.TODO(), n)
 	}
-
 	if err != nil {
-		if registerStore != nil {
-			registerStore.Release()
-		}
 		nodeStore.Release()
 		return err
 	}
 
-	nr.registerStore = registerStore
 	nr.SharedStore = nodeStore
-
 	return nil
 }
 
@@ -199,7 +226,7 @@ func (nr *NodeRegistrar) RegisterNode(n *nodeTypes.Node, manager NodeManager) er
 // SharedStore.
 func (nr *NodeRegistrar) UpdateLocalKeySync(n *nodeTypes.Node) error {
 	if nr.registerStore != nil {
-		return nr.registerStore.UpdateLocalKeySync(context.TODO(), n)
+		return nr.registerStore.UpdateLocalKeySync(context.TODO(), &RegisterNode{Node: n})
 	}
 	return nr.SharedStore.UpdateLocalKeySync(context.TODO(), n)
 }
